@@ -13,8 +13,8 @@
 .equ red_pin = 1 << 0
 .equ green_pin = 1 << 1
 .equ blue_pin = 1 << 2
-.equ blue_pnum = 3
-.equ yellow_pnum = 4
+.equ blue_pnum = 2
+.equ yellow_pnum = 3
 .equ yellow_pin = 1 << yellow_pnum
 
 
@@ -22,16 +22,31 @@
 .equ setup_pin = 1 << 2
 .equ setup_pnum = 2
 
-.equ M5L = 100
-.equ M5H = 0
+; 1 cicle = 16.384ms
+.equ S1 = 61
 
+.equ S3 = 183
+
+.equ M5L = 134	;	5m = 134	(,55)
+.equ M5H = 71	;	5m = 71
+
+.equ M15L = 147	;	15m = 147	(.64)
+.equ M15H = 214	;	15m = 214
+
+.equ M25L	= 161	;	(-.27)
+.equ M25H	= 101
+.equ M25HH	= 1
 ;====================================================================
 ; VARIABLES
 ;====================================================================
 .def temp = r16
 .def countH = r17
 .def countL = r18
+.def one = r19
 
+;.def flags = r20	; 7|6|5|4|3|2|[pushTimer]|[setupState]
+.def setStatus = r20
+.def mode = r21	; 1 = 1s, 2 = 3s
 
 ;====================================================================
 ; MACROs
@@ -63,7 +78,7 @@
 
       ; Reset Vector
       rjmp  Start
-	reti	;	rjmp EXT_INT0 ; IRQ0 Handler
+	rjmp EXT_INT0 ; IRQ0 Handler
 	reti	;	rjmp EXT_INT1 ; IRQ1 Handler
 	reti	;	rjmp TIM_CAPT1 ; Timer1 Capture Handler
 	reti	;	rjmp TIM_COMP1 ; Timer1 Compare Handler
@@ -77,50 +92,111 @@
 ;====================================================================
 ; CODE SEGMENT
 ;====================================================================
+
+EXT_INT0: ;________________________________
+	; noise reduction:
+	
+	; go to timer
+	cpi setStatus, 0
+	breq int0_push
+	
+	; button released, do smth, another 1 timer ckl skip
+	cpi setStatus, 3
+	breq int0_release
+reti
+	int0_push:
+		inc setStatus	; status 1
+reti
+	int0_release:
+		inc setStatus
+		;sbi portB, blue_pnum;
+		ldi mode, 1	; turning on led for 1s (5min)
+reti
+
 TIM_OVF1: ;________________________________
 
 reti
 
 TIM_OVF0: ;________________________________
-	mov r4, temp
-	pop r5
-	;pop temp	; try to save pointer
+	cli	; int off
 	
-	;pop countH
-	;pop countL
+	; for stack usage:
+	;pop r5			; предположительно - PC, pointer
 	
-	;;push temp
-	clr temp
+	
 
-	;inc countL	 ; not work for this (theory: it is subi -1)
-	ldi r19, 1
-	add countL, r19
-	adc countH, temp
-	
-	cpi countH, M5H
-	brne notatime;endoftim
-	cpi countL, M5L
-	brne notatime
-	
-	ldi countL, 0
-	ldi countH, 0
-	
-	ldi temp, yellow_pin
-	out portB, temp
-	
-	notatime:
+	cpi mode, 1
+	breq mode_1
 	
 	
-	;;pop temp
+	;push r5		; перенесено выше, т.к. в прот.случае придется повторять в ветках
 	
-	;push countL
-	;push countH
 	
-	;push temp
-	push r5
-	mov temp, r4
+	; int0 noise skiping, falling
+	cpi setStatus, 1
+	breq tim0_int0_1
+	cpi setStatus, 2
+	breq tim0_int0_2
+	; int0 noise skiping, rising
+	cpi setStatus, 4
+	breq tim0_int0_4
+	cpi setStatus, 5
+	breq tim0_int0_5
+	
+	sei
+reti
+	tim0_int0_1:
+		inc setStatus
+		sei
+reti
+	tim0_int0_2:
+		inc setStatus
+		; rising int:
+		tout	MCUCR,	0 << SE |	0 << SM |	0 << ISC11 |	0 << ISC10 |	1 << ISC01 |	1 << ISC00
+		; ...Interrupt 0 Sense Control 10 - falling edge, 11 - rising, 00 - Low lvl
+		sei
+reti
+	tim0_int0_4:
+		inc setStatus
+		sei
+reti
+	tim0_int0_5:
+		clr setStatus	; first state
+		; faling int:
+		tout	MCUCR,	0 << SE |	0 << SM |	0 << ISC11 |	0 << ISC10 |	1 << ISC01 |	0 << ISC00
+		; ...Interrupt 0 Sense Control 10 - falling edge, 11 - rising, 00 - Low lvl
+		sei
+reti
+	mode_1:	; 1s + LED
+		mov r4, temp	; saving temp
+		clr temp
+		
+		sbi Portb, yellow_pnum	; LED on
+	
+		;inc countL	 ; not work for this (theory: it is subi -1)
+		ldi one, 1
+		add countL, one		; true +1
+		adc countH, temp	; +carry	(temp = 0)
+		
+		cpi countH, 0
+		brne notatime;endoftim
+		cpi countL, s1
+		brne notatime
+		; it's the time:
+		ldi countL, 0
+		ldi countH, 0
+		
+		cbi Portb, yellow_pnum	; LED off
+		
+		ldi mode, 0	; возврат режима 0
+		
+		notatime:
+		
+		mov temp, r4	; temp recovery
+		sei
 reti
 
+;_____________________
 Start: ;________________________________
 
 ; timers
@@ -130,21 +206,23 @@ Start: ;________________________________
 	ldi temp, 1 << cs02 | 1 << cs00	; clock select ck/1024
 	out TCCR0, temp
 	
-	;tout GIMSK, 1 << int1 | 1 << int0	;	General Interrupt Mask
-	
 	tout	TIMSK,	1 << TOIE1 |	0 << OCIE1A |	0 << TICIE1 |	1 << TOIE0
 
+; pins int
+; int0
+
+	tout	GIMSK,	0 << int1 |	1 << int0	; General Interrupt Mask
+	; MCU Control Register, Interrupt Sense Control
+	tout	MCUCR,	0 << SE |	0 << SM |	0 << ISC11 |	0 << ISC10 |	1 << ISC01 |	0 << ISC00
+	; ...Interrupt 0 Sense Control 10 - falling edge, 11 - rising, 00 - Low lvl
+	
 ;======
-    ldi r16, red_pin
-    ldi r17, green_pin
-	add r16, r17
-	out portB, r16	;проверка
-	out ddrB, r16
+
+    tout ddrB, 255	; init outputs
 	
-	ldi temp, setup_pin
-	out portD, temp
+	tout portD, setup_pin	; init setup button
 	
-	ldi temp, RAMend
+	ldi temp, RAMend	; init stack
 	out SPL, temp
 	
 	;  на всякий случай, для переменных таймера, очищаем 2 ячейки стека
@@ -157,22 +235,9 @@ Start: ;________________________________
 	
 	
 Loop: ;________________________________
-	sbis pinD, setup_pnum
-	out portB, temp	;rcall new
+	;sbis pinD, setup_pnum
+	;out portB, temp	;rcall new
 	
       rjmp  Loop
-	  
-new:
-	sbic pinD, setup_pnum
-	ret
-	sbic pinD, setup_pnum
-	ret
-	sbic pinD, setup_pnum
-	ret
-	sbic pinD, setup_pnum
-	ret
-	out portB, temp	;проверка
-	ret
-	rjmp loop
 
 ;====================================================================
