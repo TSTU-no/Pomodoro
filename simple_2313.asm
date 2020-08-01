@@ -44,13 +44,31 @@
 .equ M25H	= 101
 .equ M25HH	= 1
 
-.equ tim_m1L = M25L
-.equ tim_m1H = M25H
-.equ tim_m1HH = M25HH
+;_________TEST_MODE____________
+.macro prodmode
 
-.equ tim_m2L = M5L
-.equ tim_m2H = M5H
-.equ tim_m2HH = 0
+	.set tim_m1L = M25L
+	.set tim_m1H = M25H
+	.set tim_m1HH = M25HH
+
+	.set tim_m2L = M5L
+	.set tim_m2H = M5H
+	.set tim_m2HH = 0
+.endmacro
+
+.macro testmode
+	.set tim_m1L = s3
+	.set tim_m1H = 0
+	.set tim_m1HH = 0
+
+	.set tim_m2L = s1
+	.set tim_m2H = 0
+	.set tim_m2HH = 0
+.endmacro
+
+; ____________How to execute?_____________; choose one:
+;testmode
+prodmode
 
 .equ MCUCR_pint0f =	0 << SE |	0 << SM |	0 << ISC11 |	0 << ISC10 |	1 << ISC01 |	0 << ISC00
 .equ MCUCR_pint0r =	0 << SE |	0 << SM |	0 << ISC11 |	0 << ISC10 |	1 << ISC01 |	1 << ISC00
@@ -315,6 +333,12 @@ Start: ;_____________________________RESET:__________________________
 	tout portD, setup_pin	; init setup button
 
 	ldi bmode, 1	; init first mode
+	; clr from random val
+	clr setStatus
+	clr mode
+	clr countL
+	clr countH
+	clr countHH
 	
 	ldi temp, RAMend	; init stack
 	out SPL, temp
