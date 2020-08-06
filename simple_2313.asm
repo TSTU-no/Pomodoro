@@ -29,6 +29,13 @@
 .equ setup_pin = 1 << 2
 .equ setup_pnum = 2
 
+;sleep mode
+.equ sleep_e = 1	; enable
+;.equ sleep_e = 1 << SE
+.equ sleep_m = 0	; 0 - idle, 1 - power-down
+;.equ sleep_m = 0 << SM
+
+
 ; 1 cycle = 16.384ms
 .equ S1 = 61
 
@@ -54,6 +61,10 @@
 	.set tim_m2L = M5L
 	.set tim_m2H = M5H
 	.set tim_m2HH = 0
+
+	.set tim_m3L = M15L
+	.set tim_m3H = M15H
+	.set tim_m3HH = 0
 .endmacro
 
 .macro testmode
@@ -64,14 +75,18 @@
 	.set tim_m2L = s1
 	.set tim_m2H = 0
 	.set tim_m2HH = 0
+
+	.set tim_m3L = s1 * 2
+	.set tim_m3H = 0
+	.set tim_m3HH = 0
 .endmacro
 
 ; ____________How to execute?_____________; choose one:
-;testmode
+testmode
 prodmode
 
-.equ MCUCR_pint0f =	0 << SE |	0 << SM |	0 << ISC11 |	0 << ISC10 |	1 << ISC01 |	0 << ISC00
-.equ MCUCR_pint0r =	0 << SE |	0 << SM |	0 << ISC11 |	0 << ISC10 |	1 << ISC01 |	1 << ISC00
+.equ MCUCR_pint0f =	sleep_e << SE |	sleep_m << SM |	0 << ISC11 |	0 << ISC10 |	1 << ISC01 |	0 << ISC00
+.equ MCUCR_pint0r =	sleep_e << SE |	sleep_m << SM |	0 << ISC11 |	0 << ISC10 |	1 << ISC01 |	1 << ISC00
 		; ...Interrupt 0 Sense Control 10 - falling edge, 11 - rising, 00 - Low lvl
 ;====================================================================
 ; VARIABLES
@@ -81,6 +96,8 @@ prodmode
 .def countH = r17
 .def countL = r18
 .def one = r19
+
+.def temp_blink = r23
 
 ;.def flags = r20	; 7|6|5|4|3|2|[pushTimer]|[setupState]
 .def setStatus = r20
@@ -186,7 +203,7 @@ TIM_OVF0: ;________________________________
 	breq mode_2
 	; 3 - 1 x 15
 	cpi mode, 8
-	breq mode_2
+	breq mode_3		; out of rich [ ] to fix
 	; else (if mode not 0):
 	cpi mode, 0
 	breq mode_0
@@ -233,7 +250,7 @@ reti
 		tout	MCUCR,	MCUCR_pint0f
 		sei
 reti
-	mode_1:	; 3s + LED
+	mode_1:	; 3s + LED	;to macro
 		mov r4, temp	; saving temp
 		clr temp
 		
@@ -270,6 +287,11 @@ reti
 		mov temp, r4	; temp recovery
 		sei
 reti
+	mode_3:
+	rjmp mode_3j
+	; ldi r30, LOW(mode_3j)
+	; ldi r31, HIGH(mode_3j)
+	; ijmp	; переход по адресу в rZ(jump to address in rZ)
 	mode_2:	; 1s + other LED
 		mov r4, temp	; saving temp
 		clr temp
@@ -305,6 +327,53 @@ reti
 		mov temp, r4	; temp recovery
 		sei
 reti
+	mode_3j:
+		mov r4, temp	; saving temp
+		clr temp
+		
+		; LEDs
+		;cbi Portb, red_pnum		; LED1 off
+		sbi Portb, green_pnum	; LED2 on
+	
+		;inc countL	 ; not work for this (theory: it is subi -1)
+		ldi one, 1
+		add countL, one		; true +1
+		adc countH, temp	; +carry	(temp = 0)
+		
+		add temp_blink, one
+		cpi temp_blink, s1
+		brlo skip_bl
+		cbi Portb, green_pnum
+		skip_bl:
+		cpi temp_blink, s1 * 2
+		brlo skip_bl2
+		sbi portB, green_pnum
+		skip_bl2:
+
+
+		cpi countHH, tim_m3HH
+		brne notatime_3
+		cpi countH, tim_m3H
+		brne notatime_3;endoftim
+		cpi countL, tim_m3L
+		brne notatime_3
+		; it's the time:
+		ldi countL, 0
+		ldi countH, 0
+		clr countHH	; L, H, HH = 0
+		
+		; LEDs off
+		cbi Portb, green_pnum	; LED off
+		
+		ldi mode, 0	; возврат режима 0
+		inc bmode	; next - mode 3, 5, etc.
+		
+		notatime_3a:
+		notatime_3:
+		
+		mov temp, r4	; temp recovery
+		sei
+reti
 
 ;_____________________
 Start: ;_____________________________RESET:__________________________
@@ -323,8 +392,11 @@ Start: ;_____________________________RESET:__________________________
 
 	tout	GIMSK,	0 << int1 |	1 << int0	; General Interrupt Mask
 	; MCU Control Register, Interrupt Sense Control
-	tout	MCUCR,	0 << ISC11 |	0 << ISC10 |	1 << ISC01 |	0 << ISC00
+	tout	MCUCR,	sleep_e << SE |	sleep_m << SM |	0 << ISC11 |	0 << ISC10 |	1 << ISC01 |	0 << ISC00
 	; ...Interrupt 0 Sense Control 10 - falling edge, 11 - rising, 00 - Low lvl; = MCUCR_pint0r
+
+; sleep mode and pwr down
+	tout ACSR, 1 << ACD ; Analog Comparator Disable
 	
 ;======
 
@@ -349,12 +421,19 @@ Start: ;_____________________________RESET:__________________________
 	push temp
 	push temp
 	
-	sei	; interrupt ON
+	sei	; interrupts ON
+
+	;deep sleep on reset
+	;tout MCUCR, 1 << SM |	MCUCR_pint0f
+	;sleep	; sleep 'til ext_int occure
+	;tout MCUCR, MCUCR_pint0f
 	
 	
 Loop: ;________________________________
 	;sbis pinD, setup_pnum
 	;out portB, temp	;rcall new
+
+	sleep	;
 	
       rjmp  Loop
 
